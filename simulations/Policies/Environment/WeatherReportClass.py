@@ -2,6 +2,7 @@ import numpy as nu
 import pandas as pd
 from scipy import interpolate
 from sklearn import gaussian_process as gp
+import sklearn as sk
 import pickle
 import subprocess as sp
 import multiprocessing as mp
@@ -99,18 +100,6 @@ class WeatherReport():
             print(f"Some files may be missing. Should have {fileCount} directories, but exactly {existingReportDirectories}.")
 
 
-    # def computeInterpolationForSimulation(self):
-    #     # spacial interpolation
-    #     dirsOfTimeStamp = os.listdir('./weatherForecasts')
-    #     processes = []
-    #     for dir in dirsOfTimeStamp:
-    #         process = mp.Process(target=computeSpacialInterpolation, args=(dir, ['VerticalWind', 'ESWind', 'NSWind']))
-    #         process.start()
-    #         processes.append(process)
-    #     for process in processes:
-    #         process.join()
-
-
     def getWindsAt(self, location, pressure, time):
         print(f'Start getting winds at {time}')
         # get file paths
@@ -123,7 +112,6 @@ class WeatherReport():
         lowerPressure = floorOf(pressure, [200, 250, 300, 350, 400, 450, 500, 550, 600, 650, 700, 750, 800, 850, 900, 925, 950, 1000])
         upperAltitude = 1.0/float(lowerPressure)
         modelBaseName = lowerTime.strftime("%Y_%m_%d_%H") + "_" + upperTime.strftime("%m_%d_%H") + "_" + f'{upperPressure}_{lowerPressure}_mb'
-        print(upperPressure, lowerAltitude, lowerPressure, upperAltitude)
         for parameter in ["NSWind"]:
             modelFileName = modelBaseName + f'_{parameter}_model.sav'
             lowerTimeLowerAltitudeFilePath = "./weatherForecasts/" + lowerTime.strftime("%Y_%m_%d_%H") + f'/{upperPressure}_mb_{parameter}.csv'
@@ -159,8 +147,7 @@ class WeatherReport():
             trainSamples = normalizer.fit_transform(nu.concatenate([_ll, _lu, _ul, _uu]))
             testSamples = normalizer.fit_transform(_ll.copy())
             # testSamples[:, 0] = testSamples[:, 0] - 2
-            scaler = sk.preprocessing.minmax_scale()
-            testSamples[:, 2] = scaler(nu.array([lowerAltitude, altitude, upperAltitude]))[1]
+            testSamples[:, 2] = sk.preprocessing.minmax_scale([lowerAltitude, altitude, upperAltitude])[1]
             testSamples[:, 3] = 0.5
 
             # print(trainSamples)

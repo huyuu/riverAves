@@ -21,6 +21,7 @@ class WeatherReport():
         # set geo location
         self.fromLocation = fromLocation
         self.toLocation = toLocation
+        self.model = None
 
 
     " get latest GFS report url "
@@ -117,66 +118,77 @@ class WeatherReport():
         upperTime = lowerTime + dt.timedelta(hours=3)
         timeDelta = (time - lowerTime).total_seconds() / 3600.0
         altitude = 1.0 / float(pressure)
-        lowerPressure = floorInto(pressure, [1000, 975, 950, 925, 900, 850, 800, 750, 700, 650, 600, 550, 500, 450, 400, 350, 300, 250, 200])
-        lowerAltitude = 1.0/float(lowerPressure)
-        upperPressure = ceilInto(pressure, [1000, 975, 950, 925, 900, 850, 800, 750, 700, 650, 600, 550, 500, 450, 400, 350, 300, 250, 200])
-        upperAltitude = 1.0/float(upperPressure)
-        modelBaseName = lowerTime.strftime("%Y_%m_%d_%H") + "_" + upperTime.strftime("%Y_%m_%d_%H") + "_" + f'{lowerPressure}_{upperPressure}_mb'
+        upperPressure = ceilOf(pressure, [200, 250, 300, 350, 400, 450, 500, 550, 600, 650, 700, 750, 800, 850, 900, 925, 950, 1000])
+        lowerAltitude = 1.0/float(upperPressure)
+        lowerPressure = floorOf(pressure, [200, 250, 300, 350, 400, 450, 500, 550, 600, 650, 700, 750, 800, 850, 900, 925, 950, 1000])
+        upperAltitude = 1.0/float(lowerPressure)
+        modelBaseName = lowerTime.strftime("%Y_%m_%d_%H") + "_" + upperTime.strftime("%m_%d_%H") + "_" + f'{upperPressure}_{lowerPressure}_mb'
+        print(upperPressure, lowerAltitude, lowerPressure, upperAltitude)
         for parameter in ["NSWind"]:
             modelFileName = modelBaseName + f'_{parameter}_model.sav'
+            lowerTimeLowerAltitudeFilePath = "./weatherForecasts/" + lowerTime.strftime("%Y_%m_%d_%H") + f'/{upperPressure}_mb_{parameter}.csv'
+            lowerTimeUpperAltitudeFilePath = "./weatherForecasts/" + lowerTime.strftime("%Y_%m_%d_%H") + f'/{lowerPressure}_mb_{parameter}.csv'
+            upperTimeLowerAltitudeFilePath = "./weatherForecasts/" + upperTime.strftime("%Y_%m_%d_%H") + f'/{upperPressure}_mb_{parameter}.csv'
+            upperTimeUpperAltitudeFilePath = "./weatherForecasts/" + upperTime.strftime("%Y_%m_%d_%H") + f'/{lowerPressure}_mb_{parameter}.csv'
+            ll = pd.read_csv(lowerTimeLowerAltitudeFilePath, index_col=0)
+            lu = pd.read_csv(lowerTimeUpperAltitudeFilePath, index_col=0).values
+            ul = pd.read_csv(upperTimeLowerAltitudeFilePath, index_col=0).values
+            uu = pd.read_csv(upperTimeLowerAltitudeFilePath, index_col=0).values
+            latitudes = ll.index.values.flatten()
+            longitudes = ll.columns.values.astype(nu.float64).flatten()
+            ll = ll.values
+            trainLabels = nu.concatenate([ll.ravel(), lu.ravel(), ul.ravel(), uu.ravel()])
+            del ll, lu, ul, uu
+            # do preprocessing for training
+            totalPoints = latitudes.shape[0]*longitudes.shape[0]
+            _latitudes, _longitudes = nu.meshgrid(latitudes, longitudes, indexing='ij')
+            # add features: latitude and longitude
+            _ll = nu.concatenate([_latitudes.reshape(-1, 1), _longitudes.reshape(-1, 1)], axis=1)
+            # add feature: altitude
+            _ll = nu.concatenate([_ll, lowerAltitude * nu.ones((totalPoints, 1))], axis=1)
+            # add feature: time
+            _ll = nu.concatenate([_ll, 0 * nu.ones((totalPoints, 1))], axis=1)
+            _lu = _ll.copy()
+            _lu[:, 2] = upperAltitude
+            _ul = _ll.copy()
+            _ul[:, 3] = 3.0
+            _uu = _ul.copy()
+            _uu[:, 2] = upperAltitude
+            # reference: https://note.nkmk.me/python-list-ndarray-dataframe-normalize-standardize/
+            normalizer = sk.preprocessing.MinMaxScaler()
+            trainSamples = normalizer.fit_transform(nu.concatenate([_ll, _lu, _ul, _uu]))
+            testSamples = normalizer.fit_transform(_ll.copy())
+            # testSamples[:, 0] = testSamples[:, 0] - 2
+            scaler = sk.preprocessing.minmax_scale()
+            testSamples[:, 2] = scaler(nu.array([lowerAltitude, altitude, upperAltitude]))[1]
+            testSamples[:, 3] = 0.5
+
+            # print(trainSamples)
+            # print(testSamples)
+            del _ll, _lu, _ul, _uu
+
+            # testSamples = nu.array([[location.latitude, location.longitude , altitude, timeDelta]])
+
             if os.path.exists(modelFileName):
-                print(f'Trained model {modelBaseName} found.')
+                print(f'Trained model {modelFileName} found.')
                 model = pickle.load(open(modelFileName, 'rb'))
-                ll = pd.read_csv(lowerTimeLowerAltitudeFilePath, index_col=0)
-                latitudes = ll.index.values.flatten()
-                longitudes = ll.columns.values.astype(nu.float64).flatten()
             else:
-                print(f'Trained model {modelBaseName} not found, start training ...')
+                print(f'Trained model {modelFileName} not found, start training ...')
                 timeConsumptionStart = dt.datetime.now()
-                lowerTimeLowerAltitudeFilePath = "./weatherForecasts/" + lowerTime.strftime("%Y_%m_%d_%H") + f'/{lowerPressure}_mb_{parameter}.csv'
-                lowerTimeUpperAltitudeFilePath = "./weatherForecasts/" + lowerTime.strftime("%Y_%m_%d_%H") + f'/{upperPressure}_mb_{parameter}.csv'
-                upperTimeLowerAltitudeFilePath = "./weatherForecasts/" + upperTime.strftime("%Y_%m_%d_%H") + f'/{lowerPressure}_mb_{parameter}.csv'
-                upperTimeUpperAltitudeFilePath = "./weatherForecasts/" + upperTime.strftime("%Y_%m_%d_%H") + f'/{upperPressure}_mb_{parameter}.csv'
-                ll = pd.read_csv(lowerTimeLowerAltitudeFilePath, index_col=0)
-                lu = pd.read_csv(lowerTimeUpperAltitudeFilePath, index_col=0).values
-                ul = pd.read_csv(upperTimeLowerAltitudeFilePath, index_col=0).values
-                uu = pd.read_csv(upperTimeLowerAltitudeFilePath, index_col=0).values
-                latitudes = ll.index.values.flatten()
-                longitudes = ll.columns.values.astype(nu.float64).flatten()
-                ll = ll.values
-                trainLabels = nu.concatenate([ll.ravel(), lu.ravel(), ul.ravel(), uu.ravel()])
-                del ll, lu, ul, uu
-                # lowerLayer = (ul - ll) / (3.0) * timeDelta + ll
-                # upperLayer = (uu - lu) / (3.0) * timeDelta + lu
-
-                totalPoints = latitudes.shape[0]*longitudes.shape[0]
-                _latitudes, _longitudes = nu.meshgrid(latitudes, longitudes, indexing='ij')
-                # add features: latitude and longitude
-                _ll = nu.concatenate([_latitudes.reshape(-1, 1), _longitudes.reshape(-1, 1)], axis=1)
-                # add feature: altitude
-                _ll = nu.concatenate([_ll, lowerAltitude * nu.ones((totalPoints, 1))], axis=1)
-                # add feature: time
-                _ll = nu.concatenate([_ll, 0 * nu.ones((totalPoints, 1))], axis=1)
-                _lu = _ll
-                _lu[:, 2] = upperAltitude
-                _ul = _ll
-                _ul[:, 3] = 3.0
-                _uu = _ul
-                _uu[:, 2] = upperAltitude
-                trainSamples = nu.concatenate([_ll, _lu, _ul, _uu])
-                del _ll, _lu, _ul, _uu
-
-                testSamples = nu.array([[location.latitude, location.longitude , altitude, timeDelta]])
-
                 # generate model
                 # reference: https://scikit-learn.org/stable/auto_examples/gaussian_process/plot_gpr_noisy_targets.html#sphx-glr-auto-examples-gaussian-process-plot-gpr-noisy-targets-py
-                kernel = 1.0 * gp.kernels.RBF(1.0)
+                # latitudeWidth = nu.abs(latitudes[0]-latitudes[-1])
+                # longitudeWidth = nu.abs(longitudes[0] - longitudes[-1])
+                # altitudeWidth = upperAltitude - lowerAltitude
+                # timeWidth = 3.0
+                kernel = 1.0 * gp.kernels.RBF()
                 model = gp.GaussianProcessRegressor(kernel=kernel, n_restarts_optimizer=9)
                 model.fit(trainSamples, trainLabels)
+                # reference: https://localab.jp/blog/save-and-load-machine-learning-models-in-python-with-scikit-learn/
                 pickle.dump(model, open(modelFileName, 'wb'))
-                timeConsumption = (dt.datetime.now() - teimConsumptionStart).total_seconds() // 60
+                timeConsumption = (dt.datetime.now() - timeConsumptionStart).total_seconds() // 60
                 print(f'Training ends. (time cost: {timeConsumption} minutes)')
-            predictedLabels, std = model.predict(trainSamples[:totalPoints, :], return_std=True)
+            predictedLabels, std = model.predict(testSamples, return_std=True)
             data = pd.DataFrame(predictedLabels.reshape(latitudes.shape[0], longitudes.shape[0]), index=latitudes, columns=longitudes)
             data.to_csv(f'predicted_{parameter}.csv', header=True, index=True)
 
@@ -236,26 +248,20 @@ def downloadAndTranslateWeatherReportToCSVFile(storedName, url, latitudeLowerBou
         newDataFrame.to_csv(path, header=True, index=True)
 
 
-def floorInto(origin, pressures):
-    originAltitude = 1.0/float(origin)
-    for index, pressure in enumerate(pressures):
-        altitude = 1.0/float(pressure)
-        if altitude > originAltitude:
-            return pressures[index-1]
-        else:
-            continue
-    return pressures[-1]
+def floorOf(value, container):
+    container.sort()
+    for index, element in enumerate(container):
+        if element >= value:
+            return container[index-1]
+    return container[-1]
 
 
-def ceilInto(origin, pressures):
-    originAltitude = 1.0/float(origin)
-    for index, pressure in enumerate(pressures):
-        altitude = 1.0/float(pressure)
-        if altitude >= originAltitude:
-            return pressures[index]
-        else:
-            continue
-    return pressures[-1]
+def ceilOf(value, container):
+    container.sort()
+    for index, element in enumerate(container):
+        if element > value:
+            return element
+    return container[-1]
 
 
 if __name__ == '__main__':
@@ -263,4 +269,5 @@ if __name__ == '__main__':
     toLocation = Location(latitude=22.9632839, longitude=120.2318360, altitude=0)
     weatherReport = WeatherReport(fromLocation=fromLocation, toLocation=toLocation)
     # weatherReport.getRecentWeatherReport()
-    weatherReport.getWindsAt(fromLocation, 915, dt.datetime.utcnow())
+    time = dt.datetime(2020, 5, 14, 10, 0, 0)
+    weatherReport.getWindsAt(fromLocation, 915, time)

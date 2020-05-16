@@ -105,6 +105,8 @@ class WeatherReport():
 
 
     def generateAllModels(self):
+        print('Start generating all model for weather prediction ... (This may take several minutes)')
+        _start = dt.datetime.now()
         # read latitudes and longitudes from random csv file
         firstDir = os.listdir("./weatherForecasts")[0]
         firstFilePath = os.listdir(f'./weatherForecasts/{firstDir}/')[0]
@@ -155,6 +157,8 @@ class WeatherReport():
             process.start()
         for process in processes:
             process.join()
+        timeConsumption = (dt.datetime.now() - _start).total_seconds()
+        print(f'Generating ends. (time cost: {timeConsumption} seconds)')
 
 
 

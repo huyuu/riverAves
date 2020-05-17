@@ -18,6 +18,7 @@ from LocationClass import Location, getGeoBoundsFromFlightPlan
 
 
 pressuresAvailable = [200, 250, 300, 350, 400, 450, 500, 550, 600, 650, 700, 750, 800, 850, 900, 925, 950, 1000]
+parametersNeeded = ['NSWind', 'ESWind']
 
 
 class WeatherReport():
@@ -25,7 +26,7 @@ class WeatherReport():
         # set geo location
         self.fromLocation = fromLocation
         self.toLocation = toLocation
-        self.model = None
+        self.currentModels = {}
         self.startTime = dt.datetime.utcnow()
 
 
@@ -104,66 +105,64 @@ class WeatherReport():
             print(f"Some files may be missing. Should have {fileCount} directories, but exactly {existingReportDirectories}.")
 
 
-    def generateAllModels(self):
-        print('Start generating all model for weather prediction ... (This may take several minutes)')
-        _start = dt.datetime.now()
-        # read latitudes and longitudes from random csv file
-        firstDir = os.listdir("./weatherForecasts")[0]
-        firstFilePath = os.listdir(f'./weatherForecasts/{firstDir}/')[0]
-        data = pd.read_csv(f'./weatherForecasts/{firstDir}/{firstFilePath}', index_col=0)
-        latitudes = data.index.values.flatten()
-        longitudes = data.columns.values.astype(nu.float64).flatten()
-        del data
-        # get stored weather forecast file names
-        forecastNames = {}
-        for dir in os.listdir("./weatherForecasts"):
-            if dir[0] != '.':
-                yearString, monthString, dayString, hourString = dir.split("_")
-                date = dt.datetime(int(yearString), int(monthString), int(dayString), int(hourString))
-                forecastNames[date] = dir
-            else:
-                continue
-        forecastNames = sorted(forecastNames.items(), key=lambda pair: pair[0])
-
-        modelDir = "./modelsForWeatherPrdicting"
-        if os.path.exists(modelDir):
-            shutil.rmtree(modelDir)
-            os.mkdir(modelDir)
-        else:
-            os.mkdir(modelDir)
-
-        processes = []
-        for latitudeIndex, latitude in enumerate(latitudes[:-1]):
-            # define latitudes
-            lowLatitude = latitude
-            highLatitude = latitudes[latitudeIndex+1]
-            for longitudeIndex, longitude in enumerate(longitudes[:-1]):
-                # define longitudes
-                lowLongitude = longitude
-                highLongitude = longitudes[longitudeIndex+1]
-                for pressureIndex, pressure in enumerate(pressuresAvailable[:-1]):
-                    # define pressures
-                    lowPressure = pressure
-                    highPressure = pressuresAvailable[pressureIndex+1]
-                    for timeIndex, (_, forecastName) in enumerate(forecastNames[:-1]):
-                        # define times
-                        lowTimeDirName = forecastName
-                        highTimeDirName = forecastNames[timeIndex+1][1]
-                        for parameter in ['NSWind']:
-                            modelBaseName = f'{modelDir}/{latitudeIndex}-{lowLatitude}-{latitudeIndex+1}-{highLatitude}-{longitudeIndex}-{lowLongitude}-{longitudeIndex+1}-{highLongitude}-{lowTimeDirName}-{highTimeDirName}-{highPressure}-{lowPressure}-mb-{parameter}'
-                            process = mp.Process(target=calculateWeatherModel, args=(modelBaseName, self.startTime))
-                            processes.append(process)
-        for process in processes:
+    def generateNeighborModels(self, location, pressure, time, shouldRunOnBackground=True):
+        if shouldRunOnBackground:
+            process = mp.Process(target=_generateNeighborModelsProcess, args=(location, pressure, time, self.startTime))
             process.start()
-        for process in processes:
-            process.join()
-        timeConsumption = (dt.datetime.now() - _start).total_seconds()
-        print(f'Generating ends. (time cost: {timeConsumption} seconds)')
+            print('Start generating neighbor models in background.')
+        else:
+            print('Start generating neighbor models for weather prediction ... (This may take several minutes)')
+            _start = dt.datetime.now()
+            _generateNeighborModelsProcess(location, pressure, time, self.startTime)
+            timeCost = (dt.datetime.now() - _start).total_seconds()
+            print(f'Neighbor models generating completed. (time cost: {timeCost} seconds)')
+
+
+    def getParametersAtPosition(self, location, pressure, time):
+        modelDir = "./modelsForWeatherPrdicting"
+        for parameter in parametersNeeded:
+            # get low layer info from position
+            lowLatitude = floorOf(location.latitude, latitudes)
+            lowLatitudeIndex = nu.where(latitudes == lowLatitude)[0][0]
+            lowLongitude = floorOf(location.longitude, longitudes)
+            lowLongitudeIndex = nu.where(longitudes == lowLongitude)[0][0]
+            highPressure = ceilOf(pressure, pressuresAvailable)
+            lowTime = dt.datetime(time.year, time.month, time.day, (time.hour // 3)*3, 0, 0)
+            lowTimeDirName = lowTime.strftime("%Y_%m_%d_%H")
+            # get high layer info from position
+            highLatitude = ceilOf(location.latitude, latitudes)
+            highLatitudeIndex = nu.where(latitudes == highLatitude)[0][0]
+            highLongitude = ceilOf(location.longitude, longitudes)
+            highLongitudeIndex = nu.where(longitudes == highLongitude)[0][0]
+            lowPressure = floorOf(pressure, pressuresAvailable)
+            highTime = lowTime + dt.timedelta(hours=3)
+            highTimeDirName = highTime.strftime("%Y_%m_%d_%H")
+            # get model base name
+            modelBaseName = f'{modelDir}/{lowLatitudeIndex}-{lowLatitude}-{highLatitudeIndex}-{highLatitude}-{lowLongitudeIndex}-{lowLongitude}-{highLongitudeIndex}-{highLongitude}-{lowTimeDirName}-{highTimeDirName}-{highPressure}-{lowPressure}-mb-{parameter}'
+            modelFileName = f'{modelBaseName}.sav'
+            # load stored model
+            model = pickle.load(open(modelFileName, 'rb'))
+            self.currentModels[parameter] = (model, modelBaseName)
+            # predict label at position
+            position = [location.latitude, location.longitude, 1.0/float(pressure), (time - self.startTime).total_seconds()]
+            label = model(position[0], position[1], position[2], position[3])
+            # add result to .csv file
+            data = pd.read_csv(f'{modelBaseName}.csv', index_col=0)
+            data.append({
+                'latitude': position[0],
+                'longitude': position[1],
+                'altitude': position[2],
+                'secondsFromStart': position[3],
+                'value': label
+            })
+            data.to_csv(f'{modelBaseName}.csv', header=True, index=True)
+            del data
 
 
 
     def getWindsAt(self, location, pressure, time):
         print(f'Start getting winds at {time}')
+
         # get file paths
         lowerTime = dt.datetime(time.year, time.month, time.day, (time.hour // 3)*3, 0, 0)
         upperTime = lowerTime + dt.timedelta(hours=3)
@@ -174,6 +173,7 @@ class WeatherReport():
         lowerPressure = floorOf(pressure, [200, 250, 300, 350, 400, 450, 500, 550, 600, 650, 700, 750, 800, 850, 900, 925, 950, 1000])
         upperAltitude = 1.0/float(lowerPressure)
         modelBaseName = lowerTime.strftime("%Y_%m_%d_%H") + "_" + upperTime.strftime("%m_%d_%H") + "_" + f'{upperPressure}_{lowerPressure}_mb'
+
         # search for models
         for parameter in ["NSWind"]:
             modelFileName = modelBaseName + f'_{parameter}_model.sav'
@@ -260,31 +260,6 @@ class WeatherReport():
             # data.to_csv(f'predicted_{parameter}.csv', header=True, index=True)
 
 
-def computeInterpolation(lowerTimeLowerLocationFilePath, lowerTimeUpperLocationFilePath, upperTimeLowerLocationFilePath, upperTimeUpperLocationFilePath, lowerTime, upperTime, currentTime):
-    # sp.call(['./computeInterpolation.jl', lowerTimeLowerLocationFilePath, lowerTimeUpperLocationFilePath, upperTimeLowerLocationFilePath, upperTimeUpperLocationFilePath])
-    ll = pd.read_csv(lowerTimeLowerLocationFilePath, index_col=0)
-    latitudes = ll.index.values
-    longitudes = ll.columns.values.astype(nu.float64)
-    ll = ll.values
-    lu = pd.read_csv(lowerTimeUpperLocationFilePath, index_col=0).values
-    ul = pd.read_csv(upperTimeLowerLocationFilePath, index_col=0).values
-    uu = pd.read_csv(upperTimeUpperLocationFilePath, index_col=0).values
-
-    lowerLayer = (ul - ll) / (upperTime - lowerTime) * (currentTime - lowerTime) + ll
-    upperLayer = (uu - lu) / (upperTime - lowerTime) * (currentTime - lowerTime) + lu
-
-    del ll, lu, ul, uu
-
-    # csvfiles = os.listdir(f'./weatherForecasts/{dirName}')
-    # for parameter in parameters:
-    #     data = None
-    #     for targetFile in filter(lambda name: parameter in name and (name.split('_')[1] == 'mb'), csvfiles):
-    #         level, unit, _ = targetFile.split('_')
-    #         level = int(level)
-
-
-
-
 def downloadAndTranslateWeatherReportToCSVFile(storedName, url, latitudeLowerBound, latitudeUpperBound, longitudeLowerBound, longitudeUpperBound):
     # download grb2 file
     # https://qiita.com/orangain/items/0a641d980019fd7e0c52
@@ -330,7 +305,69 @@ def ceilOf(value, container):
     return container[-1]
 
 
-def calculateWeatherModel(modelBaseName, startTime):
+def _generateNeighborModelsProcess(location, pressure, time, startTime):
+    # read latitudes and longitudes from random csv file
+    firstDir = os.listdir("./weatherForecasts")[3]
+    firstFilePath = os.listdir(f'./weatherForecasts/{firstDir}/')[0]
+    data = pd.read_csv(f'./weatherForecasts/{firstDir}/{firstFilePath}', index_col=0)
+    latitudes = data.index.values.flatten()
+    longitudes = data.columns.values.astype(nu.float64).flatten()
+    del data
+    latitudeInterval = nu.abs(latitudes[0] - latitudes[1])
+    longitudeInterval = nu.abs(longitudes[0] - longitudes[1])
+
+    modelDir = "./modelsForWeatherPrdicting"
+    if not os.path.exists(modelDir):
+        os.mkdir(modelDir)
+
+    # get neighbor latitudes
+    neighborLatitudes = []
+    for la in [location.latitude - latitudeInterval, location.latitude, location.latitude + latitudeInterval]:
+        if nu.min(latitudes) <= la < nu.max(latitudes):
+            neighborLatitudes.append(la)
+    # get neighbor longitudes
+    neighborLongitudes = []
+    for lo in [location.longitude - longitudeInterval, location.longitude, location.longitude + longitudeInterval]:
+        if nu.min(longitudes) <= lo < nu.max(longitudes):
+            neighborLongitudes.append(lo)
+    # get neighbor pressures
+    highPressure = ceilOf(pressure, pressuresAvailable)
+    lowPressure = ceilOf(pressure, pressuresAvailable)
+    neighborPressures = [ highPressure - 10, pressure, lowPressure + 10 ]
+    # get neighbor time
+    neighborTimes = [time, time + dt.timedelta(hours=3)]
+    # main calculate
+    processes = []
+    for la in neighborLatitudes:
+        for lo in neighborLongitudes:
+            for pre in neighborPressures:
+                for t in neighborTimes:
+                    for parameter in parametersNeeded:
+                        # get low layer info from position
+                        lowLatitude = floorOf(la, latitudes)
+                        lowLatitudeIndex = nu.where(latitudes == lowLatitude)[0][0]
+                        lowLongitude = floorOf(lo, longitudes)
+                        lowLongitudeIndex = nu.where(longitudes == lowLongitude)[0][0]
+                        highPressure = ceilOf(pre, pressuresAvailable)
+                        lowTime = dt.datetime(t.year, t.month, t.day, (t.hour // 3)*3, 0, 0)
+                        lowTimeDirName = lowTime.strftime("%Y_%m_%d_%H")
+                        # get high layer info from position
+                        highLatitude = ceilOf(la, latitudes)
+                        highLatitudeIndex = nu.where(latitudes == highLatitude)[0][0]
+                        highLongitude = ceilOf(lo, longitudes)
+                        highLongitudeIndex = nu.where(longitudes == highLongitude)[0][0]
+                        lowPressure = floorOf(pre, pressuresAvailable)
+                        highTime = lowTime + dt.timedelta(hours=3)
+                        highTimeDirName = highTime.strftime("%Y_%m_%d_%H")
+                        # get model base name
+                        modelBaseName = f'{modelDir}/{lowLatitudeIndex}-{lowLatitude}-{highLatitudeIndex}-{highLatitude}-{lowLongitudeIndex}-{lowLongitude}-{highLongitudeIndex}-{highLongitude}-{lowTimeDirName}-{highTimeDirName}-{highPressure}-{lowPressure}-mb-{parameter}'
+                        if os.path.exists(f'{modelBaseName}.sav') and os.path.exists(f'{modelBaseName}.csv'):
+                            updateWeatherModelWithSamples(modelBaseName)
+                        else:
+                            createWeatherModel(modelBaseName, startTime)
+
+
+def createWeatherModel(modelBaseName, startTime):
     lowLatitudeIndex, lowLatitude, highLatitudeIndex, highLatitude, lowLongitudeIndex, lowLongitude, highLongitudeIndex, highLongitude, lowTimeDirName, highTimeDirName, highPressure, lowPressure, _, parameter = modelBaseName.split('/')[2].split('-')
     trainSamples = []
     trainLabels = []
@@ -359,11 +396,33 @@ def calculateWeatherModel(modelBaseName, startTime):
     pickle.dump(model, open(modelFileName, 'wb'))
 
 
+def updateWeatherModelWithSamples(modelBaseName, newPoints=None):
+    pointsFilePath = modelBaseName + ".csv"
+    storedPoints = pd.read_csv(pointsFilePath, index_col=0).values
+    # if newPoints is applied, add them to trainingSamples
+    if newPoints:
+        updatedPoints = nu.concatenate([storedPoints, newPoints])
+        del storedPoints
+        trainSamples = updatedPoints[:, :4]
+        trainLabels = updatedPoints[:, 4]
+    else:  # if newPoint is None, new points must be stored in the {modelBaseName}.csv file.
+        trainSamples = storedPoints[:, :4]
+        trainLabels = storedPoints[:, 4]
+
+    # start training
+    model = interpolate.Rbf(trainSamples[:, 0], trainSamples[:, 1], trainSamples[:, 2], trainSamples[:, 3], trainLabels, function='multiquadric')
+    # reference: https://localab.jp/blog/save-and-load-machine-learning-models-in-python-with-scikit-learn/
+    modelFileName = modelBaseName + ".sav"
+    pickle.dump(model, open(modelFileName, 'wb'))
+
+
+
 if __name__ == '__main__':
     fromLocation = Location(latitude=38.2356225, longitude=140.8359262, altitude=100)
     toLocation = Location(latitude=22.9632839, longitude=120.2318360, altitude=0)
     weatherReport = WeatherReport(fromLocation=fromLocation, toLocation=toLocation)
     # weatherReport.getRecentWeatherReport()
-    weatherReport.generateAllModels()
-    # time = dt.datetime(2020, 5, 14, 10, 0, 0)
+    time = dt.datetime(2020, 5, 14, 10, 0, 0)
+    # weatherReport.generateNeighborModels(fromLocation, 915, time, shouldRunOnBackground=True)
+    weatherReport.getParametersAtPosition(fromLocation, 915, time)
     # weatherReport.getWindsAt(fromLocation, 915, time)
